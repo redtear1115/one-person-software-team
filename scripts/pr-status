@@ -1,0 +1,53 @@
+#!/bin/bash
+# pr-status: one short summary of a PR, so a bot does not print whole `gh pr view` / `gh pr checks` output.
+# Usage: pr-status <owner/repo>#<n> | pr-status <repo>#<n> (owner defaults to redtear1115) | pr-status <PR URL>
+#        pr-status --locks      only print the SCREEN lock holders
+# Read-only. Prints about 15 lines.
+set -euo pipefail
+VAULT_LOCKS="<vault>/MarsDawn/協作"
+
+locks() {
+  for f in SCREEN.md SCREEN-mba.md; do
+    p="$VAULT_LOCKS/$f"
+    [ -f "$p" ] || continue
+    holder=$(grep -m1 '^holder:' "$p" | sed 's/^holder:[[:space:]]*//')
+    queued=$(awk '/^queue:/{f=1;next} f&&/^- /{n++} f&&!/^- /&&!/^[[:space:]]*$/{f=0} END{print n+0}' "$p")
+    echo "lock $f: holder=${holder:-（空）} queue=$queued"
+  done
+}
+
+[ $# -ge 1 ] || { sed -n '2,5p' "$0" | sed 's/^# //'; exit 2; }
+if [ "$1" = "--locks" ]; then locks; exit 0; fi
+
+arg="$1"
+if [[ "$arg" =~ github\.com/([^/]+/[^/]+)/pull/([0-9]+) ]]; then
+  repo="${BASH_REMATCH[1]}"; num="${BASH_REMATCH[2]}"
+elif [[ "$arg" =~ ^([^#]+)#([0-9]+)$ ]]; then
+  repo="${BASH_REMATCH[1]}"; num="${BASH_REMATCH[2]}"
+  [[ "$repo" == */* ]] || repo="redtear1115/$repo"
+else
+  echo "pr-status: 看不懂 '$arg'，要寫成 <repo>#<n> 或 PR 網址" >&2; exit 2
+fi
+
+gh pr view "$num" -R "$repo" \
+  --json number,title,state,isDraft,headRefName,baseRefName,headRefOid,mergeable,reviewDecision,labels,statusCheckRollup,comments,updatedAt,url \
+  --jq '
+  def short: (. // "") | gsub("\r";"") | split("\n") | map(select(test("\\S"))) | .[0:2] | join(" ｜ ") | .[0:120];
+  "\(.url)",
+  "#\(.number) \(.title | .[0:80])",
+  "state=\(.state)\(if .isDraft then " draft" else "" end) mergeable=\(.mergeable) review=\(.reviewDecision // "-") updated=\(.updatedAt)",
+  "branch=\(.headRefName) -> \(.baseRefName)",
+  "head=\(.headRefOid)",
+  "labels=\([.labels[].name] | join(",") | if . == "" then "-" else . end)",
+  ( .statusCheckRollup as $c
+    | if ($c | length) == 0 then "CI: 沒有 check"
+      else "CI: " + ( $c | map(.conclusion // .state // .status // "?" | ascii_downcase)
+                        | group_by(.) | map("\(.[0])=\(length)") | join(" ") )
+      end ),
+  ( .statusCheckRollup[]
+    | select((.conclusion // .state // "") | ascii_downcase | IN("failure","error","timed_out","cancelled","action_required"))
+    | "  ✗ \(.name // .context) \(.detailsUrl // .targetUrl // "")" ),
+  "comments=\(.comments | length)，最後 3 則：",
+  ( .comments[-3:][] | "  \(.createdAt[5:16]) \(.author.login): \(.body | short)" )
+  '
+if [[ "$repo" == */mars-dawn* ]]; then locks; fi
